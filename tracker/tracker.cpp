@@ -2,6 +2,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <vector>
+#include <algorithm>
+#include <unordered_map>
 #include <string.h>
 #include <thread>
 #include <sys/socket.h>
@@ -41,9 +43,12 @@ struct group_struct
     string gpid;
     string owner;
     vector<string> members;
+    vector<string> join_reqs;
 };
 
 vector<user_struct *> users;
+unordered_map<string, group_struct> groups;
+
 void tokenise(string str, tracker_struct *tokens)
 {
     size_t end = str.find(':');
@@ -113,11 +118,26 @@ user_struct *checkDuplicateUser(string username)
     return nullptr; // No other user of same username
 }
 
+void makeHeader(int choice, string &header)
+{
+
+    int header_len = 4;
+    char buffer[8];
+
+    snprintf(buffer, sizeof(buffer), "%.*d", header_len, choice);
+    header = buffer;
+}
+
 void executeCommand(char *command, string &reply_msg)
 {
     vector<string> tokens;
     tokenise(string(command), tokens, '|');
+
     int choice = stoi(tokens[0]);
+    string header;
+    makeHeader(choice, header);
+    reply_msg.append(header);
+    reply_msg.push_back('|');
     switch (choice)
     {
     case 1:
@@ -132,11 +152,20 @@ void executeCommand(char *command, string &reply_msg)
             user_info->loggedin = false;
             // TODO: check for duplicates
             users.push_back(user_info);
-            reply_msg = "User Added successfully!!";
+
+            reply_msg.append("200");
+            reply_msg.push_back('|');
+
+            reply_msg.append("User Added successfully!!");
+            reply_msg.push_back('|');
         }
         else
         {
-            reply_msg = "Username already exists";
+            reply_msg.append("400");
+            reply_msg.push_back('|');
+
+            reply_msg.append("Username already exists");
+            reply_msg.push_back('|');
         }
         break;
     }
@@ -146,24 +175,237 @@ void executeCommand(char *command, string &reply_msg)
         if (user_info)
         {
             user_info->loggedin = true;
-            reply_msg = "User logged in successfully!!";
+
+            reply_msg.append("200");
+            reply_msg.push_back('|');
+
+            reply_msg.append(user_info->username);
+            reply_msg.push_back('|');
+
+            reply_msg.append("User logged in successfully!!");
+            reply_msg.push_back('|');
         }
         else
         {
-            reply_msg = "Invalid credentials";
+            reply_msg.append("400");
+            reply_msg.push_back('|');
+
+            reply_msg.append("Invalid credentials");
+            reply_msg.push_back('|');
         }
         break;
     }
-        // case 9:
-        // {
-        //     user_struct *user = checkDuplicateUser(tokens[1]);
-        //     if (user)
-        //     {
-        //         user->loggedin = false;
-        //         reply_msg = "User logged out successfully!!";
-        //     }
-        //     break;
-        // }
+    case 3:
+    {
+        string gpid = tokens[2];
+        if (groups.find(gpid) != groups.end())
+        {
+
+            reply_msg.append("400");
+            reply_msg.push_back('|');
+
+            reply_msg.append("Group with same ID exists");
+            reply_msg.push_back('|');
+        }
+        else
+        {
+            group_struct group_info;
+            group_info.gpid = gpid;
+            group_info.owner = tokens[1];
+            group_info.members.push_back(tokens[1]);
+            groups.insert({gpid, group_info});
+
+            reply_msg.append("200");
+            reply_msg.push_back('|');
+
+            reply_msg.append("Group created successfully!!");
+            reply_msg.push_back('|');
+        }
+
+        break;
+    }
+    case 4:
+    {
+        string userid = tokens[1];
+        string gpid = tokens[2];
+        if (groups.find(gpid) == groups.end())
+        {
+            reply_msg.append("400");
+            reply_msg.push_back('|');
+
+            reply_msg.append("Group with given ID does not exist");
+            reply_msg.push_back('|');
+        }
+        else
+        {
+            // TODO: add only if req doesn't exist
+            groups[gpid].join_reqs.push_back(userid);
+            reply_msg.append("200");
+            reply_msg.push_back('|');
+
+            reply_msg.append("Group join request sent successfully");
+            reply_msg.push_back('|');
+        }
+    }
+    case 5:
+    {
+        string userid = tokens[1];
+        string gpid = tokens[2];
+        auto gp = groups.find(gpid);
+        if (gp == groups.end())
+        {
+            reply_msg.append("400");
+            reply_msg.push_back('|');
+
+            reply_msg.append("Group with given ID does not exist");
+            reply_msg.push_back('|');
+        }
+        else
+        {
+            auto &gp_info = gp->second;
+            auto it = find(gp_info.members.begin(), gp_info.members.end(), userid);
+
+            if (it != gp_info.members.end())
+            {
+                gp_info.members.erase(it);
+                if (gp_info.owner == userid)
+                {
+                    if (!gp_info.members.empty())
+                        gp_info.owner = gp_info.members[0];
+                    else
+                        groups.erase(gp);
+                }
+
+                reply_msg.append("200");
+                reply_msg.push_back('|');
+                reply_msg.append("User successfully removed from the group");
+                reply_msg.push_back('|');
+            }
+            else
+            {
+                reply_msg.append("400");
+                reply_msg.push_back('|');
+
+                reply_msg.append("User not a member of given group");
+                reply_msg.push_back('|');
+            }
+        }
+        break;
+    }
+    case 6:
+    {
+        string gpid = tokens[2];
+        string userid = tokens[1];
+
+        // TODO: check for user calling it
+        auto gp = groups.find(gpid);
+        if (gp == groups.end())
+        {
+            reply_msg.append("400");
+            reply_msg.push_back('|');
+
+            reply_msg.append("Group with given ID does not exist");
+            reply_msg.push_back('|');
+        }
+        else
+        {
+            reply_msg.append("200");
+            reply_msg.push_back('|');
+
+            auto &gp_info = gp->second;
+            if (gp_info.join_reqs.empty())
+            {
+                reply_msg.append("No pending join requests for the group");
+                reply_msg.push_back('|');
+            }
+            else
+            {
+                for (auto req : gp_info.join_reqs)
+                {
+                    reply_msg.append(req);
+                    reply_msg.push_back('|');
+                }
+            }
+        }
+
+        break;
+    }
+    case 7:
+    {
+        string owner = tokens[1];
+        string gpid = tokens[2];
+        string userid = tokens[3];
+        auto gp = groups.find(gpid);
+        if (gp == groups.end())
+        {
+            reply_msg.append("Group with given ID does not exist");
+            reply_msg.push_back('|');
+        }
+        else
+        {
+            auto &gp_info = gp->second;
+            if (gp_info.owner != owner)
+            {
+                reply_msg.append("Only group owner allowed to accept request");
+                reply_msg.push_back('|');
+            }
+            else
+            {
+                auto it = find(gp_info.join_reqs.begin(), gp_info.join_reqs.end(), userid);
+                if (it != gp_info.join_reqs.end())
+                {
+                    gp_info.join_reqs.erase(it);
+                    gp_info.members.push_back(userid);
+                    reply_msg.append("Join request accepted for user");
+                    reply_msg.push_back('|');
+                }
+                else
+                {
+                    reply_msg.append("Join request for group not found");
+                    reply_msg.push_back('|');
+                }
+            }
+        }
+
+        break;
+    }
+    case 8:
+    {
+        if (groups.size() > 0)
+        {
+            for (auto group : groups)
+            {
+                reply_msg.append(group.first);
+                reply_msg.push_back('|');
+            }
+        }
+        else
+        {
+            reply_msg.append("No groups available");
+            reply_msg.push_back('|');
+        }
+        break;
+    }
+    case 9:
+    {
+        user_struct *user = checkDuplicateUser(tokens[1]);
+        if (user)
+        {
+            user->loggedin = false;
+            reply_msg.append("200");
+            reply_msg.push_back('|');
+            reply_msg.append("User logged out successfully!!");
+            reply_msg.push_back('|');
+        }
+        else
+        {
+            reply_msg.append("400");
+            reply_msg.push_back('|');
+            reply_msg.append("User not found");
+            reply_msg.push_back('|');
+        }
+        break;
+    }
     }
 }
 
@@ -181,17 +423,29 @@ void *listenClients(void *arg)
         if (bytes_received > 0)
         {
             buffer[bytes_received] = '\0'; // Null-terminate the string
-            cout << "Message from client: " << buffer << std::endl;
-        }
+            cout << "Message from client: " << buffer << endl;
 
-        string reply_msg;
-        executeCommand(buffer, reply_msg);
-        // Send a response back to the client
-        send(port_info->newfd, reply_msg.c_str(), reply_msg.length(), 0);
+            string reply_msg;
+            executeCommand(buffer, reply_msg);
+            // Send a response back to the client
+            // cout << "reply:" << reply_msg;
+            send(port_info->newfd, reply_msg.c_str(), reply_msg.length(), 0);
+        }
+        // else if (bytes_received == 0)
+        // {
+        //     cout << "Client disconnected\n";
+        // }
+        // else
+        // {
+        //     perror("recv");
+        //     flag = false;
+        // }
     }
 
     // Close sockets
     close(port_info->newfd);
+    delete port_info;
+    pthread_exit(NULL);
 }
 
 void *tracker(void *arg)
@@ -263,10 +517,8 @@ void *tracker(void *arg)
         port_info->clilen = clilen;
 
         pthread_t listen_thread;
-        if (pthread_create(&listen_thread, NULL, &listenClients, (void *)port_info) < 0)
-        {
-            perror("pthread");
-        }
+        // TODO: return from pthread_create
+        pthread_create(&listen_thread, NULL, listenClients, (void *)port_info);
     }
 
     close(sockfd);
@@ -330,7 +582,7 @@ int main(int argc, char *argv[])
     tokenise(curr_tracker, tracker_addr);
 
     pthread_t socket_thread;
-    pthread_create(&socket_thread, NULL, &tracker, (void *)tracker_addr);
+    pthread_create(&socket_thread, NULL, tracker, (void *)tracker_addr);
 
     string input;
     cin >> input;
@@ -348,7 +600,9 @@ int main(int argc, char *argv[])
         }
     }
 
-    pthread_cancel(socket_thread);
+    pthread_join(socket_thread, NULL);
+    delete tracker_file_path;
+    delete tracker_addr;
 
     return 0;
 }
