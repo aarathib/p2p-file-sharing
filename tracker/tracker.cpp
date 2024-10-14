@@ -71,9 +71,8 @@ struct piece_struct
     int index;
     int filesize;
     string piecehash;
-    //gp:peer
+    // gp:peer
     unordered_map<string, string> peers;
-    // vector<string> peers;
 };
 
 struct file_struct
@@ -81,8 +80,7 @@ struct file_struct
     string fileid;
     string fileSize;
     string full_hash;
-    unordered_map<string, vector<string>> peers_gps;
-    vector<piece_struct> pieces;
+    unordered_map<int, piece_struct> pieces;
 };
 
 vector<user_struct *> users;
@@ -95,7 +93,6 @@ void tokenise(string str, tracker_struct *tokens)
     if (end != string::npos)
     {
         tokens->ip = str.substr(0, end);
-        // cout << "stoi7: " << str.substr(end + 1);
         tokens->port = stoi(str.substr(end + 1).c_str());
     }
 }
@@ -108,8 +105,6 @@ void tokenise(string msg, vector<string> &msg_vector, char delimiter = ' ')
     int msg_len = msg.length();
     string token;
 
-    // int vector_len = 0;
-
     for (int i = 0; i < msg_len; i++)
     {
         if (msg[i] == delimiter)
@@ -118,7 +113,6 @@ void tokenise(string msg, vector<string> &msg_vector, char delimiter = ' ')
             {
                 msg_vector.push_back(token);
                 token.clear();
-                // vector_len++;
             }
         }
         else
@@ -131,8 +125,6 @@ void tokenise(string msg, vector<string> &msg_vector, char delimiter = ' ')
     {
         msg_vector.push_back(token);
     }
-
-    // return vector_len;
 }
 
 user_struct *findUser(string username, string password)
@@ -159,6 +151,18 @@ user_struct *checkDuplicateUser(string username)
     return nullptr; // No other user of same username
 }
 
+user_struct *findpeers(string username)
+{
+    for (const auto &user : users)
+    {
+        if (user->username == username && user->loggedin)
+        {
+            return user; // Found duplicate
+        }
+    }
+    return nullptr; // No other user of same username
+}
+
 void makeHeader(int choice, string &header)
 {
 
@@ -174,7 +178,6 @@ void executeCommand(char *command, string &reply_msg)
     vector<string> tokens;
     tokenise(string(command), tokens, '|');
 
-    // cout << "stoi8: " << tokens[0];
     int choice = stoi(tokens[0]);
     string header;
     makeHeader(choice, header);
@@ -212,6 +215,8 @@ void executeCommand(char *command, string &reply_msg)
         {
             // TODO: check port and ip
             user_info->loggedin = true;
+            user_info->ip = tokens[3];
+            user_info->port = tokens[4];
 
             reply_msg.append("200|");
             reply_msg.append(user_info->username);
@@ -398,7 +403,6 @@ void executeCommand(char *command, string &reply_msg)
         user_struct *user = checkDuplicateUser(tokens[1]);
         if (user)
         {
-            // TODO: remove from gp owner??
             user->loggedin = false;
             reply_msg.append("200|");
             reply_msg.append("User logged out successfully!!|");
@@ -421,14 +425,13 @@ void executeCommand(char *command, string &reply_msg)
             reply_msg.append("Group with given ID does not exist|");
             break;
         }
-        // check if file is there
 
         if (find(gp->second.file.begin(), gp->second.file.end(), filename) == gp->second.file.end())
             gp->second.file.push_back(filename);
         auto file = files.find(filename);
         if (file == files.end())
         {
-            cout << "file not found in group\n";
+            // file not found in group
             file_struct fileinfo;
             fileinfo.fileid = filename;
             fileinfo.fileSize = tokens[4];
@@ -440,35 +443,28 @@ void executeCommand(char *command, string &reply_msg)
                 piece_struct piece;
                 piece.index = i;
                 piece.piecehash = piece_hash[i];
-                // cout << "stoi9: " << tokens[5];
                 piece.filesize = (i == piece_hash.size() - 1 ? stoi(tokens[5]) : PIECE_SIZE);
-                fileinfo.pieces.push_back(piece);
+                piece.peers[gpid] = userid;
+                fileinfo.pieces[i] = piece;
             }
-            fileinfo.peers_gps[gpid].push_back(userid);
             files[filename] = fileinfo;
-            cout << "inserted file info\n";
         }
         else
         {
-            // TODO: check hash equality
-            cout << "file already there\n";
-            file->second.peers_gps[gpid].push_back(userid);
+            // file already there
+            int piece_size = file->second.pieces.size();
+            for (int i = 0; i < piece_size; i++)
+            {
+                file->second.pieces[i].peers[gpid] = userid;
+            }
         }
         reply_msg.append("File uploaded successfully!!|");
-
-        cout << "Available files are: ";
-        for (auto file : files)
-        {
-            cout << file.first << '\n';
-        }
         break;
     }
     case DOWNLOAD_FILE:
     {
         string gpid = tokens[1];
         string filename = tokens[2];
-        // string dest = tokens[3];
-
         auto gp = groups.find(gpid);
         if (gp == groups.end())
         {
@@ -478,42 +474,46 @@ void executeCommand(char *command, string &reply_msg)
         }
         else
         {
-            auto file = files.find(filename);
-            if (file == files.end())
+            if (find(gp->second.file.begin(), gp->second.file.end(), filename) == gp->second.file.end())
             {
                 reply_msg.append("400|");
                 reply_msg.append("File not available in group|");
             }
             else
             {
-                auto peers = file->second.peers_gps.find(gpid)->second;
+                auto file = files.find(filename);
+                file_struct fileinfo = file->second;
                 reply_msg.append("200|");
                 reply_msg.append(filename);
                 reply_msg.push_back('|');
-                reply_msg.append(file->second.fileSize);
+                reply_msg.append(fileinfo.fileSize);
                 reply_msg.push_back('|');
-                reply_msg.append(to_string(peers.size()));
+                reply_msg.append(gpid);
                 reply_msg.push_back('|');
-                for (auto peer : peers)
+                int piececount = fileinfo.pieces.size();
+                reply_msg.append(to_string(piececount));
+                reply_msg.push_back('|');
+                for (auto piece : fileinfo.pieces)
                 {
-                    user_struct *user = checkDuplicateUser(peer);
-                    reply_msg.append(user->ip);
-                    reply_msg.push_back('|');
-                    reply_msg.append(user->port);
+                    reply_msg.append(piece.second.piecehash);
+                    reply_msg.push_back('$');
+                    for (auto peer : piece.second.peers)
+                    {
+                        if (peer.first == gpid)
+                        {
+                            user_struct *user = findpeers(peer.second);
+                            reply_msg.append(user->ip);
+                            reply_msg.push_back('&');
+                            reply_msg.append(user->port);
+                            reply_msg.push_back('&');
+                        }
+                    }
                     reply_msg.push_back('|');
                 }
-                auto piece = file->second.pieces;
+                auto piece = fileinfo.pieces;
                 // last piece size
                 reply_msg.append(to_string(piece[piece.size() - 1].filesize));
                 reply_msg.push_back('|');
-                // piece count
-                reply_msg.append(to_string(piece.size()));
-                reply_msg.push_back('|');
-                for (auto p : piece)
-                {
-                    reply_msg.append(p.piecehash);
-                    reply_msg.push_back('|');
-                }
             }
         }
 
@@ -544,6 +544,13 @@ void executeCommand(char *command, string &reply_msg)
     }
 }
 
+void addPiece(string userid, string gpid, string filename, int index)
+{
+    auto file = files.find(filename);
+    auto piece = file->second.pieces.find(index);
+    piece->second.peers[gpid] = userid;
+}
+
 void *listenClients(void *arg)
 {
     port_struct *port_info = (port_struct *)arg;
@@ -558,23 +565,20 @@ void *listenClients(void *arg)
         if (bytes_received > 0)
         {
             buffer[bytes_received] = '\0'; // Null-terminate the string
-            cout << "Message from client: " << buffer << endl;
-
-            string reply_msg;
-            executeCommand(buffer, reply_msg);
-            // Send a response back to the client
-            // cout << "reply:" << reply_msg;
-            send(port_info->newfd, reply_msg.c_str(), reply_msg.length(), 0);
+            if (buffer[0] == '#')
+            {
+                string reponse = string(buffer);
+                vector<string> tokens;
+                tokenise(reponse, tokens, '#');
+                addPiece(tokens[0], tokens[1], tokens[2], stoi(tokens[3]));
+            }
+            else
+            {
+                string reply_msg;
+                executeCommand(buffer, reply_msg);
+                send(port_info->newfd, reply_msg.c_str(), reply_msg.length(), 0);
+            }
         }
-        // else if (bytes_received == 0)
-        // {
-        //     cout << "Client disconnected\n";
-        // }
-        // else
-        // {
-        //     perror("recv");
-        //     flag = false;
-        // }
     }
 
     // Close sockets
@@ -669,7 +673,6 @@ int main(int argc, char *argv[])
     }
 
     const char *tracker_file_path = argv[1];
-    // cout << "stoi10: " << argv[2];
     const int trackerno = stoi(argv[2]);
     int fd = open(tracker_file_path, O_RDONLY);
 
