@@ -7,7 +7,6 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <cstring>
 #include <iomanip>
@@ -71,8 +70,20 @@ struct port_struct
 struct peer_file_info
 {
     string filename;
+    int filesize;
     vector<socket_info> peer_sockets;
     vector<piece_info> file_piece;
+};
+
+struct download_info
+{
+    socket_info socket;
+    string filename;
+    int piece_no;
+    int piece_size;
+    string piece_hash;
+    int dest_fd;
+    pthread_mutex_t *file_write_mutex;
 };
 
 socket_info *tracker_addr = new socket_info;
@@ -90,7 +101,6 @@ void tokenise(string str, struct socket_info *tokens)
     if (end != string::npos)
     {
         tokens->ip = str.substr(0, end);
-        cout << "stoi2: " << str.substr(end + 1).c_str();
         tokens->port = stoi(str.substr(end + 1).c_str());
     }
 }
@@ -383,22 +393,22 @@ void getMessage(vector<string> &tokens, string &send_msg, int command_type)
                     vector<string> piecewise_hash;
                     ssize_t last_piece_size;
 
-                    EVP_MD_CTX *fileContext = EVP_MD_CTX_new();          // Create context
-                    EVP_DigestInit_ex(fileContext, EVP_sha1(), nullptr); // Initialize SHA-1
+                    SHA_CTX shaContext;     // Create context
+                    SHA1_Init(&shaContext); // Initialize SHA-1 context
 
                     while ((bytesRead = read(fd, buffer, PIECE_SIZE)) > 0)
                     {
                         last_piece_size = bytesRead;
                         string pieceHash = computeSHA1(buffer, bytesRead);
                         piecewise_hash.push_back(pieceHash);
-                        EVP_DigestUpdate(fileContext, buffer, bytesRead); // Update hash with data
+                        SHA1_Update(&shaContext, buffer, bytesRead); // Update hash with data
                     }
 
                     if (bytesRead == -1)
                     {
                         perror("read");
                         close(fd);
-                        EVP_MD_CTX_free(fileContext); // Free context
+                        // EVP_MD_CTX_free(fileContext); // Free context
                         // TODO: what to do
                         // return 1;
                     }
@@ -406,8 +416,8 @@ void getMessage(vector<string> &tokens, string &send_msg, int command_type)
                     close(fd);
 
                     unsigned char completeHash[SHA_DIGEST_LENGTH];
-                    EVP_DigestFinal_ex(fileContext, completeHash, nullptr); // Finalize hash
-                    EVP_MD_CTX_free(fileContext);                           // Free context
+                    SHA1_Final(completeHash, &shaContext); // Finalize SHA-1 // Finalize hash
+                    // EVP_MD_CTX_free(fileContext);                           // Free context
 
                     string completeHashString = toHexString(completeHash, SHA_DIGEST_LENGTH);
 
@@ -459,10 +469,9 @@ void getMessage(vector<string> &tokens, string &send_msg, int command_type)
                 send_msg.push_back('|');
                 send_msg.append(filename);
                 send_msg.push_back('|');
-                send_msg.append(dest);
-                send_msg.push_back('|');
+                // send_msg.append(dest);
+                // send_msg.push_back('|');
                 todownload[filename] = dest;
-                cout << "todownload: " << todownload[filename] << '\n';
             }
         }
         else
@@ -531,14 +540,11 @@ int handleDownload(int sockfd, string filename)
             cout << "Connected to peer\n";
     }
 
-    cout << "filename: " << filename << '\n';
-    cout << "before open " << todownload[filename] << '\n';
     send(sockfd, filename.c_str(), filename.length(), 0);
     int fd = open(todownload[filename].c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd == -1)
     {
-        cout << "after open " << todownload[filename] << '\n';
-        perror("openxyz");
+        perror("open");
         return 1;
     }
     while ((bytes_received = recv(sockfd, buffer, sizeof(buffer), 0)) > 0)
@@ -551,9 +557,72 @@ int handleDownload(int sockfd, string filename)
             return -1;
         }
     }
-    close(fd);
     cout << "Download complete\n";
     return 0;
+}
+
+int handleDownload1(int sockfd, string filename, int piece, string &hash, int fd, pthread_mutex_t *w_mutex, int piece_size)
+{
+    char buffer[PIECE_SIZE];
+    string send_msg = "ping";
+    send(sockfd, send_msg.c_str(), send_msg.length(), 0);
+    // why -1
+    ssize_t bytes_received = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
+    if (bytes_received > 0)
+    {
+        buffer[bytes_received] = '\0'; // Null-terminate the string
+        string reply = string(buffer);
+        if (reply == "ping")
+            cout << "Connected to peer\n";
+    }
+
+    cout << "filename: " << filename << '\n';
+    string fileinfo = filename + '|' + to_string(piece);
+    // cout << "before open " << todownload[filename] << '\n';
+    send(sockfd, fileinfo.c_str(), fileinfo.length(), 0);
+    // int fd = open(todownload[filename].c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    // if (fd == -1)
+    // {
+    //     cout << "after open " << todownload[filename] << '\n';
+    //     perror("openxyz");
+    //     return 1;
+    // }
+    ssize_t total_bytes_received = 0;
+    while (total_bytes_received < piece_size)
+    {
+        bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
+
+        pthread_mutex_lock(w_mutex);
+        lseek(fd, piece * PIECE_SIZE + total_bytes_received, SEEK_SET);
+        total_bytes_received += bytes_received;
+
+        cout << "writing by piece " << piece << '\n';
+        if (write(fd, buffer, bytes_received) == -1)
+        {
+            string msg = "piece writing error " + to_string(piece);
+            perror(msg.c_str());
+            return -1;
+        }
+        // dargs->peer.file_offset += bytes_read;
+        pthread_mutex_unlock(w_mutex);
+
+        // Writing to file
+        // if (write(fd, buffer, bytes_received) == -1)
+        // {
+        //     perror("Err");
+        //     return -1;
+        // }
+    }
+    if (total_bytes_received < piece_size)
+    {
+        cerr << "Warning: Incomplete piece received for piece " << piece << endl;
+        return 1;
+    }
+    else
+    {
+        cout << "Download complete for piece " << piece << "\n";
+        return 0;
+    }
 }
 
 void *downloadFile(void *arg)
@@ -564,7 +633,7 @@ void *downloadFile(void *arg)
     auto peer = dfile->peer_sockets[0];
     cout << "meet my peer: " << peer.ip << ":" << peer.port << '\n';
     struct sockaddr_in serv_addr;
-    char buff[BUFFER_SIZE];
+    // char buff[BUFFER_SIZE];
     // FILE *fp;
 
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -599,8 +668,137 @@ void *downloadFile(void *arg)
     pthread_exit(NULL);
 }
 
-void checkStatus(vector<string> tokens)
+void *downloadFile1(void *arg)
 {
+    download_info *meta = (download_info *)arg;
+    // socket_info *peer_addr = (socket_info *)arg;
+    string filename = meta->filename;
+    socket_info peer = meta->socket;
+    int piece_index = meta->piece_no;
+    int piece_size = meta->piece_size;
+    string piece_hash = meta->piece_hash;
+    int fd = meta->dest_fd;
+    // mutex
+
+    cout << "meet my peer: " << peer.ip << ":" << peer.port << '\n';
+    struct sockaddr_in serv_addr;
+    // char buff[BUFFER_SIZE];
+
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (sockfd < 0)
+    {
+        perror("socket");
+    }
+
+    // TODO: explore getaddrinfo
+    struct hostent *server = gethostbyname(peer.ip.c_str());
+
+    if (server == NULL)
+    {
+        cerr << "Err: no such host\n";
+    }
+
+    bzero((char *)&serv_addr, sizeof(serv_addr));
+
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = inet_addr(peer.ip.c_str());
+    serv_addr.sin_port = htons(peer.port);
+
+    if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+    {
+        perror("connect");
+    }
+
+    int reponse=handleDownload1(sockfd, filename, piece_index, piece_hash, fd, meta->file_write_mutex, piece_size);
+    if(reponse==0){
+
+        int sockfdx = socket(AF_INET, SOCK_STREAM, 0);
+
+        if (sockfdx < 0)
+        {
+            perror("socket");
+        }
+
+        // TODO: explore getaddrinfo
+        struct hostent *server = gethostbyname(tracker_addr->ip.c_str());
+
+        if (server == NULL)
+        {
+            cerr << "Err: no such host\n";
+        }
+
+        bzero((char *)&serv_addr, sizeof(serv_addr));
+
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_addr.s_addr = inet_addr(tracker_addr->ip.c_str());
+        serv_addr.sin_port = htons(tracker_addr->port);
+
+        if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+        {
+            perror("connect");
+        }
+    string respond="got it";
+        send(sockfd, respond.c_str(), respond.length(), 0);
+    }
+
+    close(sockfd);
+    pthread_exit(NULL);
+}
+
+void handleMultiplePieceDownload(peer_file_info *multiplePiece)
+{
+    cout << "REached multiple piece download\n";
+    vector<socket_info> user = multiplePiece->peer_sockets;
+    vector<piece_info> pieces = multiplePiece->file_piece;
+    int num_pieces = pieces.size();
+    int num_peers = user.size();
+    string dest = todownload[multiplePiece->filename];
+    int fd = open(dest.c_str(), O_CREAT | O_WRONLY, 0644);
+    if (fd < 0)
+    {
+        perror("open");
+        // TODO: return maybe
+    }
+
+    // Preallocate space for the file by setting its size
+    if (ftruncate(fd, multiplePiece->filesize) == -1)
+    {
+        perror("ftruncate");
+        close(fd);
+        return;
+    }
+
+    pthread_t fileThreads[num_pieces];
+    pthread_mutex_t write_mutex;
+    pthread_mutex_init(&write_mutex, NULL);
+
+    for (int i = 0; i < num_pieces; i++)
+    {
+        int peer = i % num_peers;
+        download_info *meta = new download_info;
+        meta->socket = user[peer];
+        meta->filename = multiplePiece->filename;
+        meta->piece_no = i;
+        meta->piece_size = pieces[i].filesize;
+        meta->piece_hash = pieces[i].piecehash;
+        meta->dest_fd = fd;
+        meta->file_write_mutex = &write_mutex;
+        pthread_create(&fileThreads[i], NULL, downloadFile1, (void *)meta);
+    }
+
+    for (int i = 0; i < num_pieces; i++)
+    {
+        pthread_join(fileThreads[i], NULL);
+    }
+
+    close(fd);
+    pthread_mutex_destroy(&write_mutex);
+}
+
+int checkStatus(vector<string> tokens)
+{
+    cout << "Reached check status\n";
     // cout << "stoi1: " << tokens[0];
     int choice = stoi(tokens[0]);
     int success = (tokens[1] == "200");
@@ -609,6 +807,7 @@ void checkStatus(vector<string> tokens)
     case REGISTER:
     {
         cout << tokens[2] << '\n';
+        return 1;
         break;
     }
     case LOG_IN:
@@ -693,6 +892,7 @@ void checkStatus(vector<string> tokens)
     }
     case DOWNLOAD_FILE:
     {
+        cout << "Reached case: \n";
         if (tokens[1] == "400")
         {
             cout << tokens[2] << '\n';
@@ -703,19 +903,24 @@ void checkStatus(vector<string> tokens)
             vector<piece_info> pieces;
             // cout << "stoi3: " << tokens[2];
             string filename = tokens[2];
-            int peer_count = stoi(tokens[3]);
-            int index = 4;
-            for (int i = 0; i < peer_count; i += 2)
+            int filesize = stoi(tokens[3]);
+            int peer_count = stoi(tokens[4]);
+            cout << "filename: " << filename << ";filesize: " << filesize << "; peercout: " << peer_count << '\n';
+            int index = 5;
+            for (int i = 0; i < 2 * peer_count; i++)
             {
                 socket_info socket;
                 socket.ip = tokens[index + i];
+                i++;
                 // cout << "stoi4: " << tokens[index + i + 1];
-                socket.port = stoi(tokens[index + i + 1]);
+                socket.port = stoi(tokens[index + i]);
                 peers.push_back(socket);
             }
-            index += peer_count;
+            cout << "peers collected\n";
+            index += 2 * peer_count;
             // cout << "stoi5: " << tokens[index];
             int lastpiece_size = stoi(tokens[index++]);
+            cout << "last piece: " << lastpiece_size << '\n';
             // cout << "stoi6: " << tokens[index];
             int piece_count = stoi(tokens[index++]);
             for (int i = 0; i < piece_count; i++)
@@ -726,13 +931,17 @@ void checkStatus(vector<string> tokens)
                 piece.piecehash = tokens[index + i];
                 pieces.push_back(piece);
             }
+            cout << "pieces colleted\n";
 
-            pthread_t download_thread;
+            // pthread_t download_thread;
             peer_file_info *peer_connect = new peer_file_info;
             peer_connect->filename = filename;
+            peer_connect->filesize = filesize;
             peer_connect->file_piece = pieces;
             peer_connect->peer_sockets = peers;
-            pthread_create(&download_thread, NULL, downloadFile, (void *)peer_connect);
+            cout << "download info ready peer and filepiece\n";
+            handleMultiplePieceDownload(peer_connect);
+            // pthread_create(&download_thread, NULL, downloadFile, (void *)peer_connect);
         }
 
         break;
@@ -766,18 +975,31 @@ void *listenClients(void *arg)
 
     // while (flag)
     // {
+    // TODO: why -1
     ssize_t bytes_received = recv(port_info->newfd, buffer, sizeof(buffer) - 1, 0);
     if (bytes_received > 0)
     {
         buffer[bytes_received] = '\0';
         cout << "Message from peer: " << buffer << endl;
         string reply_msg = "ping";
+        cout << "reply sent\n";
         send(port_info->newfd, reply_msg.c_str(), reply_msg.length(), 0);
         recv(port_info->newfd, buffer, sizeof(buffer) - 1, 0);
-        string filename = string(buffer);
-
+        cout << "reply receibed\n";
+        vector<string> tokens;
+        reply_msg = string(buffer);
+        cout << "repply msg:" << reply_msg << '\n';
+        tokenise(reply_msg, tokens, '|');
+        cout << "tokenised\n";
+        for (int i = 0; i < tokens.size(); i++)
+        {
+            cout << "token: " << tokens[i] << '\n';
+        }
+        string filename = tokens[0];
+        int piece = stoi(tokens[1]);
+        cout << "filename: " << filename << " piece: " << piece << '\n';
         cout << "before open " << filename << '\n';
-        int fd = open(filename.c_str(), O_RDONLY, 0644);
+        int fd = open(filename.c_str(), O_RDONLY);
         if (fd == -1)
         {
             cout << "after open " << filename << '\n';
@@ -785,6 +1007,9 @@ void *listenClients(void *arg)
             pthread_exit(NULL);
         }
         cout << "file opend\n";
+        off_t offset = piece * PIECE_SIZE;
+        lseek(fd, offset, SEEK_SET);
+
         while ((bytes_received = read(fd, buffer, sizeof(buffer))) > 0)
         {
             cout << "sending\n";
@@ -940,12 +1165,11 @@ int main(int argc, char *argv[])
     tokenise(curr_tracker, tracker_addr);
     tokenise(client_info, client_addr);
 
-    int sockfd;
     struct sockaddr_in serv_addr;
-    char buff[BUFFER_SIZE];
+    // char buff[BUFFER_SIZE];
     // FILE *fp;
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
     if (sockfd < 0)
     {
@@ -1064,6 +1288,7 @@ int main(int argc, char *argv[])
                 string reply = string(buffer);
                 // cout << reply;
                 tokenise(reply, res, '|');
+                cout << "going to check status\n";
                 checkStatus(res);
             }
         }

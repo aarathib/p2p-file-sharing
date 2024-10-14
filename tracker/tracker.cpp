@@ -71,6 +71,9 @@ struct piece_struct
     int index;
     int filesize;
     string piecehash;
+    //gp:peer
+    unordered_map<string, string> peers;
+    // vector<string> peers;
 };
 
 struct file_struct
@@ -418,10 +421,14 @@ void executeCommand(char *command, string &reply_msg)
             reply_msg.append("Group with given ID does not exist|");
             break;
         }
-        gp->second.file.push_back(filename);
+        // check if file is there
+
+        if (find(gp->second.file.begin(), gp->second.file.end(), filename) == gp->second.file.end())
+            gp->second.file.push_back(filename);
         auto file = files.find(filename);
         if (file == files.end())
         {
+            cout << "file not found in group\n";
             file_struct fileinfo;
             fileinfo.fileid = filename;
             fileinfo.fileSize = tokens[4];
@@ -439,10 +446,12 @@ void executeCommand(char *command, string &reply_msg)
             }
             fileinfo.peers_gps[gpid].push_back(userid);
             files[filename] = fileinfo;
+            cout << "inserted file info\n";
         }
         else
         {
             // TODO: check hash equality
+            cout << "file already there\n";
             file->second.peers_gps[gpid].push_back(userid);
         }
         reply_msg.append("File uploaded successfully!!|");
@@ -458,7 +467,7 @@ void executeCommand(char *command, string &reply_msg)
     {
         string gpid = tokens[1];
         string filename = tokens[2];
-        string dest = tokens[3];
+        // string dest = tokens[3];
 
         auto gp = groups.find(gpid);
         if (gp == groups.end())
@@ -481,6 +490,8 @@ void executeCommand(char *command, string &reply_msg)
                 reply_msg.append("200|");
                 reply_msg.append(filename);
                 reply_msg.push_back('|');
+                reply_msg.append(file->second.fileSize);
+                reply_msg.push_back('|');
                 reply_msg.append(to_string(peers.size()));
                 reply_msg.push_back('|');
                 for (auto peer : peers)
@@ -492,9 +503,11 @@ void executeCommand(char *command, string &reply_msg)
                     reply_msg.push_back('|');
                 }
                 auto piece = file->second.pieces;
-                reply_msg.append(to_string(piece.size()));
-                reply_msg.push_back('|');
+                // last piece size
                 reply_msg.append(to_string(piece[piece.size() - 1].filesize));
+                reply_msg.push_back('|');
+                // piece count
+                reply_msg.append(to_string(piece.size()));
                 reply_msg.push_back('|');
                 for (auto p : piece)
                 {
