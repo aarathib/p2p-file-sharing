@@ -1,4 +1,4 @@
-# **AOS Assignment 3**
+# **Peer to Peer Distributed File Sharing System**
 
 ## Instructions for execution
  **Commands:**
