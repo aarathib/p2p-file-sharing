@@ -481,6 +481,8 @@ void getMessage(vector<string> &tokens, string &send_msg, int command_type)
             {
                 send_msg.append(tokens[1]);
                 send_msg.push_back('|');
+                send_msg.append(global->userid);
+                send_msg.push_back('|');
             }
         }
         else
@@ -508,7 +510,7 @@ void getMessage(vector<string> &tokens, string &send_msg, int command_type)
         send_msg.clear();
     }
 }
-int handleDownload1(int sockfd, string filename, int piece, string &hash, int fd, pthread_mutex_t *w_mutex, int piece_size)
+int handleDownload(int sockfd, string filename, int piece, string &hash, int fd, pthread_mutex_t *w_mutex, int piece_size)
 {
     char buffer[PIECE_SIZE];
     string send_msg = "ping";
@@ -527,7 +529,7 @@ int handleDownload1(int sockfd, string filename, int piece, string &hash, int fd
     string fileinfo = filename + '|' + to_string(piece);
     send(sockfd, fileinfo.c_str(), fileinfo.length(), 0);
 
-    ssize_t total_bytes_received = 0, bytes_received;
+    ssize_t total_bytes_received = 0;
     while (total_bytes_received < piece_size)
     {
         bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
@@ -543,9 +545,11 @@ int handleDownload1(int sockfd, string filename, int piece, string &hash, int fd
         }
         pthread_mutex_unlock(w_mutex);
     }
+
+    return 0;
 }
 
-void *downloadFile1(void *arg)
+void *downloadFile(void *arg)
 {
     download_info *meta = (download_info *)arg;
     string filename = meta->filename;
@@ -584,7 +588,7 @@ void *downloadFile1(void *arg)
         perror("connect");
     }
 
-    int reponse = handleDownload1(sockfd, filename, piece_index, piece_hash, fd, meta->file_write_mutex, piece_size);
+    int reponse = handleDownload(sockfd, filename, piece_index, piece_hash, fd, meta->file_write_mutex, piece_size);
     if (reponse == 0)
     {
 
@@ -668,7 +672,7 @@ void handleMultiplePieceDownload(peer_file_info *multiplePiece, string gpid)
         meta->socket.port = pieces[i].peers[last_index].second;
         meta->dest_fd = fd;
         meta->file_write_mutex = &write_mutex;
-        pthread_create(&fileThreads[i], NULL, downloadFile1, (void *)meta);
+        pthread_create(&fileThreads[i], NULL, downloadFile, (void *)meta);
     }
 
     for (int i = 0; i < num_pieces; i++)
@@ -680,7 +684,7 @@ void handleMultiplePieceDownload(peer_file_info *multiplePiece, string gpid)
     pthread_mutex_destroy(&write_mutex);
 }
 
-int checkStatus(vector<string> tokens)
+void checkStatus(vector<string> tokens)
 {
     int choice = stoi(tokens[0]);
     int success = (tokens[1] == "200");
@@ -689,7 +693,6 @@ int checkStatus(vector<string> tokens)
     case REGISTER:
     {
         cout << tokens[2] << '\n';
-        return 1;
         break;
     }
     case LOG_IN:

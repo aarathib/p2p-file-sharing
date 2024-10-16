@@ -522,6 +522,7 @@ void executeCommand(char *command, string &reply_msg)
     case LIST_FILES:
     {
         string gpid = tokens[1];
+        string userid = tokens[2];
         auto gp = groups.find(gpid);
         if (gp == groups.end())
         {
@@ -531,11 +532,21 @@ void executeCommand(char *command, string &reply_msg)
         }
         else
         {
-            reply_msg.append("200|");
-            for (auto f : gp->second.file)
+            if (find(gp->second.members.begin(), gp->second.members.end(), userid) == gp->second.members.end())
             {
-                reply_msg.append(f);
-                reply_msg.push_back('|');
+
+                reply_msg.append("400|");
+                reply_msg.append("Not a member of group|");
+                break;
+            }
+            else
+            {
+                reply_msg.append("200|");
+                for (auto f : gp->second.file)
+                {
+                    reply_msg.append(f);
+                    reply_msg.push_back('|');
+                }
             }
         }
 
